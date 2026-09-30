@@ -1,0 +1,219 @@
+﻿<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Shazify - Détection & Notifications</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #121212; color: #fff; text-align: center; padding: 30px; }
+        .card { background: #181818; max-width: 550px; margin: 0 auto; padding: 30px; border-radius: 16px; box-shadow: 0 4px 25px rgba(0,0,0,0.6); }
+        button { background: #1DB954; color: white; border: none; padding: 14px 24px; font-size: 15px; border-radius: 30px; cursor: pointer; font-weight: bold; margin: 6px; transition: 0.2s; }
+        button:hover { background: #1ed760; transform: scale(1.02); }
+        button.active { background: #e91e63; }
+        button.secondary { background: #333; }
+        button.secondary:hover { background: #444; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        #status { margin-top: 15px; font-size: 16px; color: #b3b3b3; }
+        
+        .player-box { margin-top: 25px; display: none; background: #282828; padding: 20px; border-radius: 12px; }
+        .cover-img { width: 180px; height: 180px; border-radius: 8px; object-fit: cover; box-shadow: 0 4px 12px rgba(0,0,0,0.4); margin-bottom: 15px; }
+        .track-title { font-size: 20px; font-weight: bold; color: #1DB954; margin-bottom: 5px; }
+        .track-artist { font-size: 16px; color: #ccc; margin-bottom: 15px; }
+        iframe { border-radius: 12px; width: 100%; height: 80px; border: none; margin-top: 10px; }
+
+        .log { margin-top: 25px; text-align: left; max-height: 140px; overflow-y: auto; background: #111; padding: 12px; border-radius: 8px; font-size: 13px; color: #aaa; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>🎵 Shazify</h1>
+        <p>Reconnaissance automatique, audio & notifications.</p>
+        
+        <button id="recordBtn">Écouter (5s)</button>
+        <button id="autoBtn">Activer Détection Continue</button>
+        <button id="notifBtn" class="secondary">🔔 Activer Notifications</button>
+
+        <div id="status">En attente...</div>
+
+        <!-- Lecteur et Pochette -->
+        <div id="playerBox" class="player-box">
+            <img id="coverImg" class="cover-img" src="" alt="Pochette Album">
+            <div id="trackTitle" class="track-title"></div>
+            <div id="trackArtist" class="track-artist"></div>
+            <iframe id="spotifyWidget" src="" allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture" loading="lazy"></iframe>
+        </div>
+
+        <div class="log" id="historyLog"><strong>Historique de la session :</strong></div>
+    </div>
+
+    <script>
+        const recordBtn = document.getElementById("recordBtn");
+        const autoBtn = document.getElementById("autoBtn");
+        const notifBtn = document.getElementById("notifBtn");
+        const statusDiv = document.getElementById("status");
+        
+        const playerBox = document.getElementById("playerBox");
+        const coverImg = document.getElementById("coverImg");
+        const trackTitle = document.getElementById("trackTitle");
+        const trackArtist = document.getElementById("trackArtist");
+        const spotifyWidget = document.getElementById("spotifyWidget");
+        const historyLog = document.getElementById("historyLog");
+
+        let isAutoMode = false;
+        let lastAddedTrack = "";
+
+        // Function pour jouer un son de notification discret via Web Audio API
+        function playBeepSound() {
+            try {
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+
+                osc.type = "sine";
+                osc.frequency.setValueAtTime(587.33, audioCtx.currentTime); // Note D5
+                osc.frequency.exponentialRampToValueAtTime(880, audioCtx.currentTime + 0.15); // Note A5
+
+                gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.3);
+
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.3);
+            } catch (e) {
+                console.log("Audio non autorisé par le navigateur");
+            }
+        }
+
+        // Demande d autorisation pour les notifications du navigateur
+        notifBtn.addEventListener("click", () => {
+            if ("Notification" in window) {
+                Notification.requestPermission().then(permission => {
+                    if (permission === "granted") {
+                        alert("Notifications activées avec succès !");
+                        notifBtn.innerText = "🔔 Notifications OK";
+                        notifBtn.disabled = true;
+                    } else {
+                        alert("Permission refusée pour les notifications.");
+                    }
+                });
+            } else {
+                alert("Votre navigateur ne supporte pas les notifications.");
+            }
+        });
+
+        function sendDesktopNotification(title, artist, iconUrl) {
+            if ("Notification" in window && Notification.permission === "granted") {
+                new Notification(`🎵 Shazify : ${title}`, {
+                    body: `Par ${artist} — Ajouté à Spotify !`,
+                    icon: iconUrl || "https://open.spotify.com/favicon.ico"
+                });
+            }
+        }
+
+        async function recordAndAnalyze() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const mediaRecorder = new MediaRecorder(stream);
+                const chunks = [];
+
+                mediaRecorder.ondataavailable = e => chunks.push(e.data);
+                mediaRecorder.onstop = async () => {
+                    const blob = new Blob(chunks, { type: "audio/mp3" });
+                    const formData = new FormData();
+                    formData.append("file", blob, "audio.mp3");
+
+                    statusDiv.innerText = "Analyse en cours...";
+                    
+                    try {
+                        const response = await fetch("/api/identify-and-add", {
+                            method: "POST",
+                            body: formData
+                        });
+                        const data = await response.json();
+
+                        if (data.recognized && data.spotify) {
+                            const trackName = `${data.recognized.title} - ${data.recognized.artist}`;
+                            
+                            // Affichage du lecteur
+                            playerBox.style.display = "block";
+                            trackTitle.innerText = data.recognized.title;
+                            trackArtist.innerText = data.recognized.artist;
+                            
+                            if (data.spotify.cover_url) {
+                                coverImg.src = data.spotify.cover_url;
+                            }
+                            if (data.spotify.track_id) {
+                                spotifyWidget.src = `https://open.spotify.com/embed/track/${data.spotify.track_id}?utm_source=generator&theme=0`;
+                            }
+
+                            if (data.spotify.status !== "already_exists") {
+                                statusDiv.innerText = "✅ Ajouté à la playlist Shazify !";
+                                playBeepSound();
+                                sendDesktopNotification(data.recognized.title, data.recognized.artist, data.spotify.cover_url);
+                            } else {
+                                statusDiv.innerText = "ℹ️ Morceau déjà présent dans la playlist.";
+                            }
+
+                            if (lastAddedTrack !== trackName) {
+                                lastAddedTrack = trackName;
+                                const item = document.createElement("div");
+                                item.innerText = `• ${trackName}`;
+                                historyLog.appendChild(item);
+                            }
+                        } else {
+                            statusDiv.innerText = `ℹ️ ${data.message || "Aucun morceau détecté."}`;
+                        }
+                    } catch (err) {
+                        statusDiv.innerText = "Erreur de connexion au serveur.";
+                    }
+
+                    stream.getTracks().forEach(track => track.stop());
+
+                    if (isAutoMode) {
+                        setTimeout(recordAndAnalyze, 2000);
+                    } else {
+                        recordBtn.disabled = false;
+                    }
+                };
+
+                mediaRecorder.start();
+                statusDiv.innerText = "Écoute en cours (5 secondes)...";
+
+                setTimeout(() => {
+                    if (mediaRecorder.state === "recording") {
+                        mediaRecorder.stop();
+                    }
+                }, 5000);
+
+            } catch (err) {
+                alert("Erreur micro ou permission refusée.");
+                isAutoMode = false;
+                autoBtn.classList.remove("active");
+                autoBtn.innerText = "Activer Détection Continue";
+                recordBtn.disabled = false;
+            }
+        }
+
+        recordBtn.addEventListener("click", () => {
+            recordBtn.disabled = true;
+            recordAndAnalyze();
+        });
+
+        autoBtn.addEventListener("click", () => {
+            isAutoMode = !isAutoMode;
+            if (isAutoMode) {
+                autoBtn.classList.add("active");
+                autoBtn.innerText = "Arrêter Détection Continue";
+                recordBtn.disabled = true;
+                recordAndAnalyze();
+            } else {
+                autoBtn.classList.remove("active");
+                autoBtn.innerText = "Activer Détection Continue";
+                statusDiv.innerText = "Arrêt demandé...";
+            }
+        });
+    </script>
+</body>
+</html>
+
